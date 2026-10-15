@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ブロックパズル</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <h1>ブロックパズル</h1>
+
+    <div id="score-display">
+        スコア：<span id="score">0</span>
+    </div>
+
+    <div id="game-board"></div>
+
+    <h2>ブロックを選んでください</h2>
+
+    <div id="pieces"></div>
+
+
+    <!-- ゲームオーバー画面 -->
+
+    <div id="game-over" class="hidden">
+
+        <div id="game-over-box">
+
+            <h2>GAME OVER</h2>
+
+            <p>
+                スコア：
+                <span id="final-score">0</span>
+            </p>
+
+            <button id="restart-button">
+                もう一度遊ぶ
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <script src="script.js"></script>
+
+</body>
+</html>
