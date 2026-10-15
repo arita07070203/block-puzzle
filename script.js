@@ -3,6 +3,8 @@ const BOARD_SIZE = 10;
 const board = document.getElementById("game-board");
 const piecesArea = document.getElementById("pieces");
 const scoreDisplay = document.getElementById("score");
+const rotateButton = document.getElementById("rotate-button");
+const soundToggle = document.getElementById("sound-toggle");
 
 const gameOverScreen =
     document.getElementById("game-over");
@@ -36,6 +38,13 @@ let boardData = Array.from(
     { length: BOARD_SIZE },
     () => Array(BOARD_SIZE).fill(false)
 );
+
+let lastClearedRows = [];
+let lastClearedColumns = [];
+let lastPlacedCells = [];
+let lineEffectToken = 0;
+let soundContext = null;
+let soundEnabled = true;
 
 
 // =========================
@@ -86,6 +95,7 @@ const SHAPES = [
 // =========================
 
 let currentPieces = [];
+let currentPieceRotations = [];
 
 
 // 選択中のブロック
@@ -101,10 +111,104 @@ let suppressPieceClick = false;
 // スコア表示
 // =========================
 
-function updateScore() {
+function updateScore(effect = "normal", clearedLines = 0) {
 
+    const previousScore = Number(scoreDisplay.textContent) || 0;
     scoreDisplay.textContent = score;
 
+    if (score > previousScore) {
+        scoreDisplay.classList.remove("score-pulse");
+        scoreDisplay.classList.remove("score-pulse-line");
+        void scoreDisplay.offsetWidth;
+        scoreDisplay.style.setProperty(
+            "--score-pop-scale",
+            effect === "line"
+                ? (clearedLines >= 3 ? "1.42" : clearedLines === 2 ? "1.34" : "1.26")
+                : "1.18"
+        );
+        scoreDisplay.classList.add(
+            effect === "line" ? "score-pulse-line" : "score-pulse"
+        );
+    }
+
+}
+
+function playGameSound(clearedLines = 0) {
+    if (!soundEnabled) return;
+
+    const AudioContextType = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextType) return;
+
+    try {
+        if (!soundContext) soundContext = new AudioContextType();
+        if (soundContext.state === "suspended") {
+            soundContext.resume().catch(() => {});
+        }
+
+        const now = soundContext.currentTime;
+        const notes = clearedLines > 0
+            ? (clearedLines >= 3 ? [660, 880, 1100] : clearedLines === 2 ? [660, 880] : [740, 988])
+            : [520];
+
+        notes.forEach((frequency, index) => {
+            const oscillator = soundContext.createOscillator();
+            const volume = soundContext.createGain();
+            const startAt = now + index * 0.035;
+            const peak = clearedLines > 0 ? 0.035 : 0.018;
+
+            oscillator.type = "sine";
+            oscillator.frequency.setValueAtTime(frequency, startAt);
+            volume.gain.setValueAtTime(0.0001, startAt);
+            volume.gain.exponentialRampToValueAtTime(peak, startAt + 0.012);
+            volume.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.12);
+            oscillator.connect(volume);
+            volume.connect(soundContext.destination);
+            oscillator.start(startAt);
+            oscillator.stop(startAt + 0.13);
+        });
+    } catch {
+        // サウンド非対応の環境ではゲームをそのまま続ける
+    }
+}
+
+function updateSoundButton() {
+    soundToggle.textContent = soundEnabled ? "🔊" : "🔇";
+    soundToggle.setAttribute("aria-pressed", String(soundEnabled));
+    soundToggle.setAttribute(
+        "aria-label",
+        soundEnabled ? "効果音をオフにする" : "効果音をオンにする"
+    );
+}
+
+function setSoundEnabled(enabled) {
+    soundEnabled = enabled;
+    updateSoundButton();
+
+    try {
+        localStorage.setItem("blockPuzzleSoundEnabled", String(soundEnabled));
+    } catch {
+        // 保存できない環境でも、現在のページ内では切り替えを有効にする
+    }
+
+    if (!soundEnabled && soundContext && soundContext.state === "running") {
+        soundContext.suspend().catch(() => {});
+    }
+}
+
+function initializeSoundToggle() {
+    try {
+        const savedSetting = localStorage.getItem("blockPuzzleSoundEnabled");
+        if (savedSetting === "true" || savedSetting === "false") {
+            soundEnabled = savedSetting === "true";
+        }
+    } catch {
+        soundEnabled = true;
+    }
+
+    updateSoundButton();
+    soundToggle.addEventListener("click", () => {
+        setSoundEnabled(!soundEnabled);
+    });
 }
 
 
@@ -115,6 +219,7 @@ function updateScore() {
 function generatePieces() {
 
     currentPieces = [];
+    currentPieceRotations = [0, 0, 0];
 
     for (let i = 0; i < 3; i++) {
 
@@ -129,8 +234,53 @@ function generatePieces() {
 
     selectedPiece = null;
 
-    drawPieces();
+    drawPieces(true);
 
+}
+
+// =========================
+// ブロックの回転
+// =========================
+
+function rotateMatrixClockwise(shape) {
+    return shape[0].map((_, column) =>
+        shape.map(row => row[column]).reverse()
+    );
+}
+
+function getRotatedShape(shapeIndex, turns) {
+    let shape = SHAPES[shapeIndex];
+
+    for (let i = 0; i < turns; i++) {
+        shape = rotateMatrixClockwise(shape);
+    }
+
+    return shape;
+}
+
+function updateRotateButton() {
+    rotateButton.disabled =
+        gameOver ||
+        !currentPieces.some(
+            shapeIndex => shapeIndex !== null && shapeIndex !== undefined
+        );
+}
+
+function rotateAvailablePieces() {
+    if (gameOver) {
+        return;
+    }
+
+    currentPieces.forEach((shapeIndex, pieceNumber) => {
+        if (shapeIndex === null || shapeIndex === undefined) {
+            return;
+        }
+
+        currentPieceRotations[pieceNumber] =
+            (currentPieceRotations[pieceNumber] + 1) % 4;
+    });
+
+    drawPieces(false, true);
 }
 
 
@@ -140,6 +290,8 @@ function generatePieces() {
 
 function drawBoard() {
 
+    const effectToken = ++lineEffectToken;
+    board.classList.remove("line-clear-shake");
     board.innerHTML = "";
 
     for (
@@ -163,7 +315,31 @@ function drawBoard() {
             if (boardData[y][x]) {
 
                 cell.classList.add("filled");
+                cell.classList.add(`piece-color-${boardData[y][x] - 1}`);
 
+            }
+
+            if (
+                lastClearedRows.includes(y) ||
+                lastClearedColumns.includes(x)
+            ) {
+                cell.classList.add("line-clear-flash");
+
+                const delaySteps = [];
+                if (lastClearedRows.includes(y)) delaySteps.push(x);
+                if (lastClearedColumns.includes(x)) delaySteps.push(y);
+                cell.style.setProperty(
+                    "--line-delay",
+                    `${Math.min(...delaySteps) * 9}ms`
+                );
+            }
+
+            if (
+                lastPlacedCells.some(position => position.x === x && position.y === y) &&
+                !lastClearedRows.includes(y) &&
+                !lastClearedColumns.includes(x)
+            ) {
+                cell.classList.add("block-pop");
             }
 
 
@@ -194,6 +370,41 @@ function drawBoard() {
 
     }
 
+    lastClearedRows = [];
+    lastClearedColumns = [];
+    lastPlacedCells = [];
+
+    const lineCount = Number(board.dataset.pendingClearCount || 0);
+    delete board.dataset.pendingClearCount;
+
+    if (lineCount > 0) {
+        const shakeDistance = Math.min(lineCount, 4);
+        board.style.setProperty("--shake-distance", `${shakeDistance}px`);
+        board.style.setProperty("--shake-negative", `${-shakeDistance}px`);
+        board.style.setProperty("--shake-recoil", `${-shakeDistance * 0.45}px`);
+        board.style.setProperty(
+            "--burst-scale",
+            lineCount >= 3 ? "0.12" : lineCount === 2 ? "0.18" : "0.24"
+        );
+        board.style.setProperty(
+            "--clear-brightness",
+            lineCount >= 3 ? "2.1" : lineCount === 2 ? "1.8" : "1.55"
+        );
+        board.style.setProperty(
+            "--clear-opacity",
+            lineCount >= 3 ? "1" : lineCount === 2 ? "0.92" : "0.82"
+        );
+        board.classList.add("line-clear-shake");
+
+        window.setTimeout(() => {
+            if (effectToken !== lineEffectToken) return;
+            board.querySelectorAll(".line-clear-flash").forEach(cell => {
+                cell.classList.remove("line-clear-flash");
+            });
+            board.classList.remove("line-clear-shake");
+        }, 500);
+    }
+
 }
 
 
@@ -201,7 +412,7 @@ function drawBoard() {
 // ブロックを描画
 // =========================
 
-function drawPieces() {
+function drawPieces(animateSpawn = false, animateRotation = false) {
 
     piecesArea.innerHTML = "";
 
@@ -215,14 +426,29 @@ function drawPieces() {
             }
 
 
-            const shape =
-                SHAPES[shapeIndex];
+            const shape = getRotatedShape(
+                shapeIndex,
+                currentPieceRotations[pieceNumber] || 0
+            );
 
 
             const piece =
                 document.createElement("div");
 
             piece.classList.add("piece");
+            piece.classList.add(`piece-color-${shapeIndex}`);
+            piece.dataset.pieceNumber = pieceNumber;
+
+            if (animateSpawn) {
+                piece.classList.add("piece-pop-in");
+                piece.style.animationDelay = `${pieceNumber * 65}ms`;
+            } else if (animateRotation) {
+                piece.classList.add("piece-rotate-in");
+            }
+
+            if (selectedPiece === pieceNumber) {
+                piece.classList.add("selected");
+            }
 
             piece.addEventListener(
                 "pointerdown",
@@ -231,20 +457,11 @@ function drawPieces() {
                         return;
                     }
 
-                    const cellIndex =
-                        Array.from(piece.children).indexOf(event.target);
-
                     pendingDrag = {
                         pieceNumber,
                         pointerId: event.pointerId,
                         startX: event.clientX,
                         startY: event.clientY,
-                        offsetX: cellIndex >= 0
-                            ? cellIndex % shape[0].length
-                            : 0,
-                        offsetY: cellIndex >= 0
-                            ? Math.floor(cellIndex / shape[0].length)
-                            : 0,
                         dragging: false
                     };
                 }
@@ -322,6 +539,8 @@ function drawPieces() {
                         "selected"
                     );
 
+                    updateRotateButton();
+
                 }
             );
 
@@ -331,30 +550,47 @@ function drawPieces() {
         }
     );
 
+    updateRotateButton();
+
 }
 
 // =========================
 // ドラッグ操作
 // =========================
 
-function getBoardCellAt(clientX, clientY) {
-    const element = document.elementFromPoint(clientX, clientY);
-    const cell = element && element.closest
-        ? element.closest("#game-board .cell")
-        : null;
-
-    if (!cell) {
+function getPlacementStartAt(pieceNumber, clientX, clientY) {
+    const boardRect = board.getBoundingClientRect();
+    if (
+        clientX < boardRect.left ||
+        clientX > boardRect.right ||
+        clientY < boardRect.top ||
+        clientY > boardRect.bottom
+    ) {
         return null;
     }
 
-    const index = Array.from(board.children).indexOf(cell);
-    if (index < 0) {
+    const cells = board.children;
+    const first = cells[0]?.getBoundingClientRect();
+    const nextColumn = cells[1]?.getBoundingClientRect();
+    const nextRow = cells[BOARD_SIZE]?.getBoundingClientRect();
+
+    if (!first || !nextColumn || !nextRow) {
         return null;
     }
+
+    const centerX = first.left + first.width / 2;
+    const centerY = first.top + first.height / 2;
+    const stepX = nextColumn.left + nextColumn.width / 2 - centerX;
+    const stepY = nextRow.top + nextRow.height / 2 - centerY;
+
+    const shape = getRotatedShape(
+        currentPieces[pieceNumber],
+        currentPieceRotations[pieceNumber] || 0
+    );
 
     return {
-        x: index % BOARD_SIZE,
-        y: Math.floor(index / BOARD_SIZE)
+        x: Math.round((clientX - centerX) / stepX - (shape[0].length - 1) / 2),
+        y: Math.round((clientY - centerY) / stepY - (shape.length - 1) / 2)
     };
 }
 
@@ -366,6 +602,9 @@ function clearDragPreview() {
 
     board.querySelectorAll(".drag-target").forEach(cell => {
         cell.classList.remove("drag-target", "drag-invalid");
+        Array.from(cell.classList)
+            .filter(className => className.startsWith("preview-color-"))
+            .forEach(className => cell.classList.remove(className));
     });
 }
 
@@ -381,7 +620,12 @@ function updateDragPreview(event) {
         document.body.appendChild(dragPreview);
     }
 
-    const shape = SHAPES[currentPieces[drag.pieceNumber]];
+    const shapeIndex = currentPieces[drag.pieceNumber];
+    const shape = getRotatedShape(
+        shapeIndex,
+        currentPieceRotations[drag.pieceNumber] || 0
+    );
+    dragPreview.classList.add(`piece-color-${shapeIndex}`);
     dragPreview.style.gridTemplateColumns = `repeat(${shape[0].length}, 25px)`;
     dragPreview.innerHTML = "";
 
@@ -391,18 +635,24 @@ function updateDragPreview(event) {
         dragPreview.appendChild(block);
     }));
 
-    dragPreview.style.left = `${event.clientX + 12}px`;
-    dragPreview.style.top = `${event.clientY - 60}px`;
+    dragPreview.style.left = `${event.clientX}px`;
+    dragPreview.style.top = `${event.clientY}px`;
 
     board.querySelectorAll(".drag-target").forEach(cell => {
         cell.classList.remove("drag-target", "drag-invalid");
+        Array.from(cell.classList)
+            .filter(className => className.startsWith("preview-color-"))
+            .forEach(className => cell.classList.remove(className));
     });
 
-    const cell = getBoardCellAt(event.clientX, event.clientY);
-    if (!cell) return;
+    const placement = getPlacementStartAt(
+        drag.pieceNumber,
+        event.clientX,
+        event.clientY
+    );
+    if (!placement) return;
 
-    const startX = cell.x - drag.offsetX;
-    const startY = cell.y - drag.offsetY;
+    const { x: startX, y: startY } = placement;
     const valid = canPlacePiece(drag.pieceNumber, startX, startY);
 
     shape.forEach((row, y) => row.forEach((value, x) => {
@@ -413,6 +663,7 @@ function updateDragPreview(event) {
 
         const target = board.children[boardY * BOARD_SIZE + boardX];
         target.classList.add("drag-target");
+        target.classList.add(`preview-color-${shapeIndex}`);
         if (!valid) target.classList.add("drag-invalid");
     }));
 }
@@ -443,15 +694,19 @@ window.addEventListener("pointerup", event => {
     pendingDrag = null;
 
     if (drag.dragging) {
-        const cell = getBoardCellAt(event.clientX, event.clientY);
+        const placement = getPlacementStartAt(
+            drag.pieceNumber,
+            event.clientX,
+            event.clientY
+        );
         clearDragPreview();
         suppressPieceClick = true;
 
-        if (cell && !gameOver) {
+        if (placement && !gameOver) {
             placePiece(
                 drag.pieceNumber,
-                cell.x - drag.offsetX,
-                cell.y - drag.offsetY
+                placement.x,
+                placement.y
             );
         }
 
@@ -491,8 +746,10 @@ function canPlacePiece(
     }
 
 
-    const shape =
-        SHAPES[shapeIndex];
+    const shape = getRotatedShape(
+        shapeIndex,
+        currentPieceRotations[pieceNumber] || 0
+    );
 
 
     for (
@@ -586,8 +843,10 @@ function placePiece(
     }
 
 
-    const shape =
-        SHAPES[shapeIndex];
+    const shape = getRotatedShape(
+        shapeIndex,
+        currentPieceRotations[pieceNumber] || 0
+    );
 
 
     // =========================
@@ -634,8 +893,12 @@ function placePiece(
                     startY + y
                 ][
                     startX + x
-                ] = true;
+                ] = shapeIndex + 1;
 
+                lastPlacedCells.push({
+                    x: startX + x,
+                    y: startY + y
+                });
 
                 placedBlocks++;
 
@@ -672,13 +935,15 @@ function placePiece(
     const clearedLines =
         clearCompletedLines();
 
+    playGameSound(clearedLines);
+
 
     if (clearedLines > 0) {
 
         score +=
             clearedLines * 100;
 
-        updateScore();
+        updateScore("line", clearedLines);
 
     }
 
@@ -725,6 +990,9 @@ function clearCompletedLines() {
     const rowsToClear = [];
 
     const columnsToClear = [];
+
+    lastClearedRows = [];
+    lastClearedColumns = [];
 
 
     // 横
@@ -803,6 +1071,13 @@ function clearCompletedLines() {
         }
 
     }
+
+
+    lastClearedRows = rowsToClear.slice();
+    lastClearedColumns = columnsToClear.slice();
+    board.dataset.pendingClearCount = String(
+        rowsToClear.length + columnsToClear.length
+    );
 
 
     // 横を消す
@@ -961,15 +1236,20 @@ function endGame() {
     gameOver = true;
 
     selectedPiece = null;
+    updateRotateButton();
 
 
     finalScore.textContent =
         score;
 
 
-    gameOverScreen.classList.remove(
-        "hidden"
-    );
+    board.classList.add("game-over-dark");
+
+    window.setTimeout(() => {
+        if (!gameOver) return;
+        gameOverScreen.classList.remove("hidden");
+        gameOverScreen.classList.add("game-over-show");
+    }, 90);
 
 }
 
@@ -985,6 +1265,8 @@ function restartGame() {
     gameOver = false;
 
     selectedPiece = null;
+    board.classList.remove("game-over-dark");
+    gameOverScreen.classList.remove("game-over-show");
 
 
     boardData = Array.from(
@@ -1017,11 +1299,17 @@ restartButton.addEventListener(
     restartGame
 );
 
+rotateButton.addEventListener(
+    "click",
+    rotateAvailablePieces
+);
+
 
 // =========================
 // ゲーム開始
 // =========================
 
+initializeSoundToggle();
 updateScore();
 
 drawBoard();
