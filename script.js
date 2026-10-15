@@ -43,6 +43,7 @@ let lastClearedRows = [];
 let lastClearedColumns = [];
 let lastPlacedCells = [];
 let lineEffectToken = 0;
+let resolvingLines = false;
 let soundContext = null;
 let soundEnabled = true;
 
@@ -267,7 +268,7 @@ function updateRotateButton() {
 }
 
 function rotateAvailablePieces() {
-    if (gameOver) {
+    if (gameOver || resolvingLines) {
         return;
     }
 
@@ -349,7 +350,7 @@ function drawBoard() {
 
                     if (
                         selectedPiece !== null &&
-                        !gameOver
+                        !gameOver && !resolvingLines
                     ) {
 
                         placePiece(
@@ -453,7 +454,7 @@ function drawPieces(animateSpawn = false, animateRotation = false) {
             piece.addEventListener(
                 "pointerdown",
                 (event) => {
-                    if (gameOver || event.button > 0) {
+                    if (gameOver || resolvingLines || event.button > 0) {
                         return;
                     }
 
@@ -511,7 +512,7 @@ function drawPieces(animateSpawn = false, animateRotation = false) {
                 "click",
                 () => {
 
-                    if (gameOver) {
+                    if (gameOver || resolvingLines) {
                         return;
                     }
 
@@ -702,7 +703,7 @@ window.addEventListener("pointerup", event => {
         clearDragPreview();
         suppressPieceClick = true;
 
-        if (placement && !gameOver) {
+        if (placement && !gameOver && !resolvingLines) {
             placePiece(
                 drag.pieceNumber,
                 placement.x,
@@ -818,13 +819,9 @@ function canPlacePiece(
 // ブロックを置く
 // =========================
 
-function placePiece(
-    pieceNumber,
-    startX,
-    startY
-) {
+function placePiece(pieceNumber, startX, startY) {
 
-    if (gameOver) {
+    if (gameOver || resolvingLines) {
         return;
     }
 
@@ -864,7 +861,6 @@ function placePiece(
         return;
 
     }
-
 
     // =========================
     // ブロックを配置
@@ -928,55 +924,8 @@ function placePiece(
     selectedPiece = null;
 
 
-    // =========================
-    // ライン消去
-    // =========================
-
-    const clearedLines =
-        clearCompletedLines();
-
-    playGameSound(clearedLines);
-
-
-    if (clearedLines > 0) {
-
-        score +=
-            clearedLines * 100;
-
-        updateScore("line", clearedLines);
-
-    }
-
-
-    // =========================
-    // 画面更新
-    // =========================
-
-    drawBoard();
-
-    drawPieces();
-
-
-    // =========================
-    // 3個全部使った
-    // =========================
-
-    if (
-        currentPieces[0] === null &&
-        currentPieces[1] === null &&
-        currentPieces[2] === null
-    ) {
-
-        generatePieces();
-
-    }
-
-
-    // =========================
-    // ゲームオーバー確認
-    // =========================
-
-    checkGameOver();
+    resolvingLines = true;
+    resolveLineCascades();
 
 }
 
@@ -985,146 +934,84 @@ function placePiece(
 // ライン消去
 // =========================
 
-function clearCompletedLines() {
+function findCompletedLines() {
+    const rows = [];
+    const columns = [];
 
-    const rowsToClear = [];
+    for (let y = 0; y < BOARD_SIZE; y++) {
+        if (boardData[y].every(Boolean)) rows.push(y);
+    }
 
-    const columnsToClear = [];
+    for (let x = 0; x < BOARD_SIZE; x++) {
+        if (boardData.every(row => Boolean(row[x]))) columns.push(x);
+    }
 
-    lastClearedRows = [];
-    lastClearedColumns = [];
+    return { rows, columns };
+}
 
+function resolveLineCascades(totalClearedLines = 0) {
+    const { rows, columns } = findCompletedLines();
+    const linesThisPass = rows.length + columns.length;
 
-    // 横
+    if (linesThisPass === 0) {
+        resolvingLines = false;
 
-    for (
-        let y = 0;
-        y < BOARD_SIZE;
-        y++
-    ) {
+        if (totalClearedLines > 0) {
+            score += totalClearedLines * 100;
+            updateScore("line", totalClearedLines);
+        }
 
-        let complete = true;
+        playGameSound(totalClearedLines);
+        drawBoard();
+        drawPieces();
 
-
-        for (
-            let x = 0;
-            x < BOARD_SIZE;
-            x++
+        if (
+            currentPieces[0] === null &&
+            currentPieces[1] === null &&
+            currentPieces[2] === null
         ) {
+            generatePieces();
+        }
 
-            if (
-                !boardData[y][x]
-            ) {
+        checkGameOver();
+        return;
+    }
 
-                complete = false;
+    // まず該当ラインだけを光らせ、盤面データは演出終了まで残す。
+    lastClearedRows = rows;
+    lastClearedColumns = columns;
+    board.dataset.pendingClearCount = String(linesThisPass);
+    drawBoard();
 
-                break;
+    // 最長のライン演出が終わってから対象だけを消し、列ごとに下詰めする。
+    window.setTimeout(() => {
+        rows.forEach(y => {
+            for (let x = 0; x < BOARD_SIZE; x++) boardData[y][x] = false;
+        });
+        columns.forEach(x => {
+            for (let y = 0; y < BOARD_SIZE; y++) boardData[y][x] = false;
+        });
 
+        applyColumnGravity();
+        resolveLineCascades(totalClearedLines + linesThisPass);
+    }, 430);
+}
+
+// ライン消去後だけ、各列のブロックを形状に関係なく下へ詰める。
+function applyColumnGravity() {
+    for (let x = 0; x < BOARD_SIZE; x++) {
+        const blocks = [];
+
+        for (let y = BOARD_SIZE - 1; y >= 0; y--) {
+            if (boardData[y][x]) {
+                blocks.push(boardData[y][x]);
             }
-
         }
 
-
-        if (complete) {
-
-            rowsToClear.push(y);
-
+        for (let y = BOARD_SIZE - 1; y >= 0; y--) {
+            boardData[y][x] = blocks[BOARD_SIZE - 1 - y] || false;
         }
-
     }
-
-
-    // 縦
-
-    for (
-        let x = 0;
-        x < BOARD_SIZE;
-        x++
-    ) {
-
-        let complete = true;
-
-
-        for (
-            let y = 0;
-            y < BOARD_SIZE;
-            y++
-        ) {
-
-            if (
-                !boardData[y][x]
-            ) {
-
-                complete = false;
-
-                break;
-
-            }
-
-        }
-
-
-        if (complete) {
-
-            columnsToClear.push(x);
-
-        }
-
-    }
-
-
-    lastClearedRows = rowsToClear.slice();
-    lastClearedColumns = columnsToClear.slice();
-    board.dataset.pendingClearCount = String(
-        rowsToClear.length + columnsToClear.length
-    );
-
-
-    // 横を消す
-
-    for (
-        const y of rowsToClear
-    ) {
-
-        for (
-            let x = 0;
-            x < BOARD_SIZE;
-            x++
-        ) {
-
-            boardData[y][x] =
-                false;
-
-        }
-
-    }
-
-
-    // 縦を消す
-
-    for (
-        const x of columnsToClear
-    ) {
-
-        for (
-            let y = 0;
-            y < BOARD_SIZE;
-            y++
-        ) {
-
-            boardData[y][x] =
-                false;
-
-        }
-
-    }
-
-
-    return (
-        rowsToClear.length +
-        columnsToClear.length
-    );
-
 }
 
 
